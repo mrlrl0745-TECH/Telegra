@@ -1,0 +1,119 @@
+x-app-environment: &app-environment
+  APP_COMPONENT: api
+  APP_NAME: ${APP_NAME:-KSP Generator}
+  APP_ENV: ${APP_ENV:-development}
+  APP_URL: ${APP_URL:-http://localhost:5173}
+  FRONTEND_URL: ${FRONTEND_URL:-http://localhost:5173}
+  SECRET_KEY: ${SECRET_KEY:?Set SECRET_KEY in .env}
+  DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL in .env}
+  TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+  BOT_USERNAME: ${BOT_USERNAME:-}
+  AI_PROVIDER: ${AI_PROVIDER:-google}
+  GOOGLE_AI_API_KEY: ${GOOGLE_AI_API_KEY:-}
+  GOOGLE_AI_MODEL: ${GOOGLE_AI_MODEL:-gemini-3.8-flash}
+  OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+  OPENROUTER_MODEL: ${OPENROUTER_MODEL:-}
+  OPENROUTER_BASE_URL: ${OPENROUTER_BASE_URL:-https://openrouter.ai/api/v1}
+  OPENROUTER_TIMEOUT: ${OPENROUTER_TIMEOUT:-90}
+  AI_TEST_MODE: ${AI_TEST_MODE:-false}
+  DEV_AUTH_ENABLED: ${DEV_AUTH_ENABLED:-false}
+  PAYMENT_TEST_MODE: ${PAYMENT_TEST_MODE:-false}
+  PAYMENT_PROVIDER: ${PAYMENT_PROVIDER:-mock}
+  PAYMENT_PROVIDER_TOKEN: ${PAYMENT_PROVIDER_TOKEN:-}
+  ADMIN_TELEGRAM_IDS: ${ADMIN_TELEGRAM_IDS:-}
+  MAX_UPLOAD_BYTES: ${MAX_UPLOAD_BYTES:-10485760}
+  FREE_GENERATIONS: ${FREE_GENERATIONS:-3}
+  MAX_AI_REQUESTS_PER_HOUR: ${MAX_AI_REQUESTS_PER_HOUR:-20}
+  MAX_TEMPLATES_PER_USER: ${MAX_TEMPLATES_PER_USER:-20}
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-ksp}
+      POSTGRES_USER: ${POSTGRES_USER:-ksp}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+      POSTGRES_APP_USER: ${POSTGRES_APP_USER:-ksp_app}
+      POSTGRES_APP_PASSWORD: ${POSTGRES_APP_PASSWORD:?Set POSTGRES_APP_PASSWORD in .env}
+      POSTGRES_BOT_USER: ksp_bot
+      POSTGRES_BOT_PASSWORD: ${POSTGRES_BOT_PASSWORD:?Set POSTGRES_BOT_PASSWORD in .env}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./docker/postgres-init-app-user.sh:/docker-entrypoint-initdb.d/10-create-app-user.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"
+    environment:
+      <<: *app-environment
+      UPLOAD_DIR: /data/uploads
+    volumes:
+      - uploads:/data/uploads
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=128m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    ports:
+      - "127.0.0.1:8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        VITE_API_URL: ${VITE_API_URL:-http://localhost:8000}
+        VITE_DEV_MODE: ${DEV_AUTH_ENABLED:-false}
+    ports:
+      - "127.0.0.1:5173:8080"
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    depends_on:
+      - backend
+
+  bot:
+    profiles: ["telegram"]
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["python", "-m", "app.bot"]
+    environment:
+      APP_COMPONENT: bot
+      APP_NAME: ${APP_NAME:-KSP Generator}
+      APP_ENV: ${APP_ENV:-development}
+      APP_URL: ${APP_URL:-http://localhost:5173}
+      FRONTEND_URL: ${FRONTEND_URL:-http://localhost:5173}
+      DATABASE_URL: ${BOT_DATABASE_URL:?Set BOT_DATABASE_URL in .env}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      BOT_USERNAME: ${BOT_USERNAME:-}
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  postgres_data:
+  uploads:
