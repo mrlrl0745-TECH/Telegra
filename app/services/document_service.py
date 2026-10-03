@@ -1,6 +1,7 @@
 from io import BytesIO
 from html import escape
 from pathlib import Path
+from zipfile import BadZipFile, ZipFile
 
 from docx import Document
 from docx.enum.section import WD_ORIENT
@@ -51,7 +52,7 @@ def _text(cell, value: str, *, bold: bool = False, center: bool = False, size: i
     paragraph.paragraph_format.space_before = Pt(0)
     run = paragraph.add_run(value or "")
     run.bold = bold
-    run.font.name = "Arial"
+    DocumentService._set_run_font(run, "Arial")
     run.font.size = Pt(size)
     run.font.color.rgb = RGBColor(0, 0, 0)
 
@@ -70,14 +71,20 @@ class DocumentService:
         section.top_margin = section.bottom_margin = Inches(0.35)
         normal = doc.styles["Normal"]
         normal.font.name = "Arial"
+        normal._element.rPr.rFonts.set(qn("w:eastAsia"), "Arial")
+        normal._element.rPr.rFonts.set(qn("w:cs"), "Arial")
         normal.font.size = Pt(9)
 
         title = doc.add_paragraph()
         title.paragraph_format.space_after = Pt(4)
-        title.add_run(content.title).font.size = Pt(12)
+        title_run = title.add_run(content.title)
+        DocumentService._set_run_font(title_run, "Arial")
+        title_run.font.size = Pt(12)
         topic = doc.add_paragraph()
         topic.paragraph_format.space_after = Pt(8)
-        topic.add_run("______________________________________________\n(сабақ тақырыбы)" if content.language == "kk" else "______________________________________________\n(тема урока)").font.size = Pt(10)
+        topic_run = topic.add_run("______________________________________________\n(сабақ тақырыбы)" if content.language == "kk" else "______________________________________________\n(тема урока)")
+        DocumentService._set_run_font(topic_run, "Arial")
+        topic_run.font.size = Pt(10)
 
         meta = doc.add_table(rows=8, cols=3)
         meta.alignment = WD_TABLE_ALIGNMENT.CENTER
@@ -131,16 +138,48 @@ class DocumentService:
             paragraph.paragraph_format.space_before = Pt(5)
             run = paragraph.add_run("Үй тапсырмасы: " if content.language == "kk" else "Домашнее задание: ")
             run.bold = True
-            paragraph.add_run(content.homework)
+            DocumentService._set_run_font(run, "Arial")
+            body_run = paragraph.add_run(content.homework)
+            DocumentService._set_run_font(body_run, "Arial")
         if content.reflection:
             paragraph = doc.add_paragraph()
             paragraph.paragraph_format.space_before = Pt(2)
             run = paragraph.add_run("Рефлексия: ")
             run.bold = True
-            paragraph.add_run(content.reflection)
+            DocumentService._set_run_font(run, "Arial")
+            reflection_run = paragraph.add_run(content.reflection)
+            DocumentService._set_run_font(reflection_run, "Arial")
         output = BytesIO()
         doc.save(output)
-        return output.getvalue()
+        rendered = output.getvalue()
+        DocumentService.validate_docx(rendered)
+        return rendered
+
+    @staticmethod
+    def _set_run_font(run, font_name: str) -> None:
+        run.font.name = font_name
+        properties = run._element.get_or_add_rPr()
+        fonts = properties.rFonts
+        if fonts is None:
+            fonts = OxmlElement("w:rFonts")
+            properties.append(fonts)
+        for script in ("ascii", "hAnsi", "eastAsia", "cs"):
+            fonts.set(qn(f"w:{script}"), font_name)
+
+    @staticmethod
+    def validate_docx(data: bytes) -> None:
+        """Fail closed before download if the in-memory OOXML package is incomplete."""
+        if not data or len(data) < 4 or not data.startswith(b"PK\x03\x04"):
+            raise ValueError("DOCX export is empty or has an invalid signature")
+        try:
+            with ZipFile(BytesIO(data)) as archive:
+                names = set(archive.namelist())
+                if "[Content_Types].xml" not in names or "word/document.xml" not in names:
+                    raise ValueError("DOCX export is missing required document parts")
+                if archive.testzip() is not None:
+                    raise ValueError("DOCX export contains a damaged package entry")
+        except BadZipFile as exc:
+            raise ValueError("DOCX export is not a valid ZIP package") from exc
 
     @staticmethod
     def to_pdf(data: LessonContent | dict) -> bytes:
@@ -216,7 +255,10 @@ class DocumentService:
         if content.reflection:
             story.extend([Spacer(1, 3), p(("Рефлексия: " if is_kk else "Рефлексия: ") + content.reflection, body)])
         document.build(story)
-        return output.getvalue()
+        rendered = output.getvalue()
+        if not rendered.startswith(b"%PDF-"):
+            raise ValueError("PDF export is empty or has an invalid signature")
+        return rendered
 
     @staticmethod
     def _register_pdf_fonts() -> tuple[str, str]:

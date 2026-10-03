@@ -1,17 +1,17 @@
 # Security Audit
 
-Дата проверки: 2026-10-02  
+Дата проверки: 2026-10-03
 Область: локальная копия проекта `C:\Users\ADMIN\Desktop\Telegram pomosh`; production-среда и внешние платёжные системы не подключались.
 
 ## Executive Summary
 
 В приложении уже были серверная проверка HMAC Telegram `initData`, JWT-аутентификация, владельческие SQL-фильтры, серверные admin checks, ограничения загрузок, ограничение AI-токенов и отключение тестовой оплаты при production-настройке. Аудит выявил четыре подтверждённые уязвимости в бизнес-логике и запросах, а также два важных deployment-риска. Добавлены исправления и регрессионные тесты.
 
-**Открытый высокий риск:** значение `GOOGLE_AI_API_KEY` в `.env.example` было непустым, не выглядело как placeholder и совпадало с локальным значением в `.env`. Значение удалено из примера, но ключ не был проверен у провайдера и не был отозван. Считайте его раскрытым и замените в Google AI; после замены обновите `.env`. Полное значение ключа здесь не приводится.
+**Открытый высокий риск:** в прежней версии `.env.example` были непустые значения Telegram bot token и Google AI API key. Текущие примеры очищены, однако проверка Git history обнаружила оба неплейсхолдерных значения в прежнем коммите. Считайте оба секрета раскрытыми: отзовите и замените их у соответствующих провайдеров, обновите локальный `.env` и секреты хостинга. История автоматически не переписывалась; перед публикацией репозитория удалите эти значения из доступной истории и проверьте последствия для копий. Значения здесь не приводятся.
 
 Второй deployment-риск был в PostgreSQL Compose: `POSTGRES_USER` создаётся официальным образом как superuser, а `env_file: .env` передавал секреты БД всем контейнерам приложения. Compose теперь создаёт отдельные роли `ksp_app` и `ksp_bot`, а backend и bot получают только свои DSN. Для уже инициализированного Docker volume скрипт ролей нужно применить вручную от имени старого администратора до следующего запуска миграций. Docker и PostgreSQL в этой среде отсутствуют, поэтому роль и контейнеры не запускались.
 
-Подтверждённых CRITICAL findings не осталось. Проект пока нельзя считать готовым к production до ротации Google AI ключа и проверки настройки ролей на целевой PostgreSQL. Локальный `.env` сейчас настроен как development, с dev auth и тестовой оплатой; production validator эти флаги запрещает.
+Подтверждённых CRITICAL findings не осталось. Проект пока нельзя считать готовым к production до ротации Telegram и Google AI секретов и проверки настройки ролей на целевой PostgreSQL. Production validator запрещает dev auth и тестовую оплату.
 
 ## Security Inventory
 
@@ -58,19 +58,19 @@ Docker services: `postgres`, `backend`, `frontend`, опциональный `bo
 
 ## High Findings
 
-### SEC-001 — Возможное раскрытие Google AI API key
+### SEC-001 — Секреты попали в `.env.example`
 
 - **Severity:** HIGH; CVSS v3.1 оценка 5.1, ориентировочная. CVSS не отражает расход средств у AI-провайдера.
 - **Компонент:** Secrets/config; `.env.example`.
 - **Endpoint:** нет.
-- **Описание:** в исходном `.env.example` находилось непустое значение Google AI API key, не похожее на placeholder. Без вывода значения сравнено с локальным `.env`: строки совпадали. Публичность и действительность ключа не проверялись.
+- **Описание:** при текущей проверке в `.env.example` были непустые значения `TELEGRAM_BOT_TOKEN` и `GOOGLE_AI_API_KEY`. Их действительность и внешняя доступность не проверялись.
 - **Причина:** секрет был скопирован в пример конфигурации, который явно исключён из `.gitignore` и предназначен для распространения.
 - **Безопасное воспроизведение:** до исправления точное сравнение локально подтвердило совпадение; ключ не отправлялся провайдеру и не печатался. Валидность не проверена.
-- **Влияние:** если ключ действующий и пример был передан или опубликован, посторонний может использовать AI quota/учётную запись владельца.
-- **Исправление:** значение удалено из `.env.example`; поле оставлено пустым.
+- **Влияние:** если значения действующие и пример был передан или опубликован, посторонние могли использовать Telegram bot или AI quota владельца.
+- **Исправление:** оба значения удалены из `.env.example`; поля оставлены пустыми.
 - **Изменённые файлы:** `.env.example`.
 - **Security test:** повторный exact-value scan backend/frontend/tests/Docker/build не нашёл локальные credential values; поле в примере пустое.
-- **Результат повторной проверки:** source/build очищены. Требуется отозвать старый ключ и выпустить новый; это не делалось, чтобы не использовать реальные секреты и не менять внешнюю учётную запись. `.git` отсутствует, поэтому Git history проверить нельзя.
+- **Результат повторной проверки:** текущие примеры очищены. Требуется отозвать оба старых значения и выпустить новые; внешние учётные записи не менялись.
 
 ## Medium Findings
 
@@ -156,7 +156,7 @@ Docker services: `postgres`, `backend`, `frontend`, опциональный `bo
 
 ### INFO-002 — Python dependency audit неполный
 
-`pnpm audit --prod --json` сообщил 0 advisories для 5 production dependencies. `pip-audit`, `safety`, `bandit`, `osv-scanner` и Docker scanner недоступны. Python зависимости описаны диапазонами в `requirements.txt` без lockfile, поэтому транзитивные версии и CVE не подтверждены инструментом. `pytest` удалён из production `requirements.txt` и остаётся в `requirements-dev.txt`.
+`pnpm audit --prod --json` сообщил 0 advisories для 7 production dependencies. `pip-audit`, `safety`, `bandit`, `osv-scanner` и Docker scanner недоступны. Python зависимости описаны диапазонами в `requirements.txt` без lockfile, поэтому транзитивные версии и CVE не подтверждены инструментом. `pytest` удалён из production `requirements.txt` и остаётся в `requirements-dev.txt`.
 
 ### INFO-003 — In-memory IP rate limit не разделяется между процессами
 
@@ -210,7 +210,7 @@ Local API key не найден во frontend source или собранном b
 
 ## Secrets
 
-`.env` и `.env.*` игнорируются Git; `.dockerignore` и `frontend/.dockerignore` исключают `.env`. После удаления значения `.env.example` exact-value scan не нашёл local credentials в app/frontend/tests/build/Docker/README. `GOOGLE_AI_API_KEY` всё ещё задан в локальном `.env` и совпадал с прежним примером; замените ключ у провайдера. Telegram/OpenRouter/payment provider secrets локально пусты. `.git` отсутствует — история и удалённые refs не проверены.
+`.env` и `.env.*` игнорируются Git; `.dockerignore` и `frontend/.dockerignore` исключают `.env`. Текущий source/build scan не обнаружил точных значений или похожих на секреты шаблонов; оба примера окружения очищены. Отдельный безопасный scan Git history обнаружил неплейсхолдерные поля `TELEGRAM_BOT_TOKEN` и `GOOGLE_AI_API_KEY` в прежнем коммите `.env.example`. Значения не записывались в отчёт. Локальный `.env` не выводился и не менялся. История не переписывалась.
 
 ## Docker
 
@@ -218,7 +218,7 @@ Backend запускается как non-root `app`, frontend как `nginx` н
 
 ## Dependencies
 
-Frontend audit: `pnpm audit --prod --json` — 0 vulnerabilities/advisories, 5 production dependencies. Python dependency CVE scan — NOT TESTED (нет локального scanner). Python requirements не lockfile; зафиксируйте транзитивные версии и повторите `pip-audit`/аналог в CI. В production requirements удалён `pytest`.
+Frontend audit: `pnpm audit --prod --json` — 0 vulnerabilities/advisories, 7 production dependencies. Python dependency CVE scan — NOT TESTED (нет локального scanner). Python requirements не lockfile; зафиксируйте транзитивные версии и повторите `pip-audit`/аналог в CI. В production requirements удалён `pytest`.
 
 ## Rate Limiting
 
@@ -232,7 +232,7 @@ Frontend audit: `pnpm audit --prod --json` — 0 vulnerabilities/advisories, 5 p
 
 | ID | Исправление | Проверка после исправления |
 |---|---|---|
-| SEC-001 | Удалено непустое Google API key из `.env.example` | Exact credential scan source/build: совпадений нет; ключ требуется ротировать отдельно |
+| SEC-001 | Очищены Telegram bot token и Google AI API key из `.env.example` | Текущий source/build scan без совпадений; Git history содержит оба старых значения — требуется ротация и очистка истории |
 | SEC-002 | Отдельные PostgreSQL app/read-only bot роли; superuser env из backend/bot удалён | Compose YAML/static checks + SQLite Alembic upgrade; Postgres runtime NOT TESTED |
 | SEC-003 | Одноразовый Telegram initData fingerprint | Повтор возвращает 401 |
 | SEC-004 | Атомарное списание квоты и учёт regenerate | Параллельный SQLite race: 1×200 и 1×402 |
@@ -241,26 +241,26 @@ Frontend audit: `pnpm audit --prod --json` — 0 vulnerabilities/advisories, 5 p
 
 ## Validation Performed
 
-- `.\.venv\Scripts\python.exe -m pytest -q` — **36 passed** после исправлений. Перед исправлениями соответствующие локальные regression checks воспроизвели повторное использование Telegram `initData`, бесплатный regenerate, двойное списание одной квоты при параллельном SQLite запросе, возврат terminal payment state в success и обход лимита chunked body.
-- `pnpm run build` — успешно.
-- `pnpm audit --prod --json` — 0 advisories для 5 production dependencies.
-- `alembic upgrade head` на отдельной временной SQLite базе — успешно, миграции 0001–0003.
-- Compose YAML и статические проверки конфигурации/секретов — успешно. Docker, PostgreSQL client и Bash недоступны, поэтому контейнеры, nginx runtime и реальные PostgreSQL grants не проверялись.
+- `\.venv\Scripts\python.exe -m pytest -q` — **38 passed**. Регрессионное покрытие включает изоляцию архивов двух пользователей, копирование/редактирование, валидность DOCX и сценарий учителя-замены с замоканным AI provider.
+- `pnpm run build` — успешно; TypeScript проверка включена в build.
+- `pnpm audit --prod --json` — 0 advisories для 7 production dependencies.
+- `alembic upgrade head` на отдельной временной SQLite базе — успешно, schema version 0003.
+- Статический scan текущих файлов/сборки не нашёл секретов; Git history scan обнаружил прежние неплейсхолдерные значения Telegram и Google AI в `.env.example`. Docker CLI, PostgreSQL client и Python dependency scanner недоступны: Compose runtime, nginx, реальные PostgreSQL grants и Python CVE scan не проверялись.
 - Production payment provider и его webhook не подключены; реальные платежи и внешние AI вызовы не выполнялись.
 
 ## Remaining Risks
 
-1. Заменить Google AI key, который совпадал с прежним `.env.example`; действие от имени владельца провайдера не выполнялось.
+1. Отозвать и заменить Telegram bot token и Google AI API key, попавшие в прежний `.env.example`; действия у провайдеров не выполнялись.
 2. На существующем PostgreSQL volume запустить роль bootstrap script вручную и проверить grants; Docker/psql runtime проверки нет.
 3. Провести real PostgreSQL concurrency/webhook tests до запуска с production БД.
 4. Реальный платёжный adapter/webhook не реализован; пока платежи — только тестовая симуляция.
-5. Python dependency CVE scan и Git history scan не выполнены.
+5. Удалить старые секреты из доступной Git history, оценив последствия для remote и клонов; история не переписывалась. Python dependency CVE scan не выполнен.
 6. Подтвердить политику хранения и условия обработки пользовательских данных в выбранном AI provider; не включать персональные данные учеников в prompt/template.
 7. Добавить shared rate limiter при deployment более чем с одним backend process/replica.
 
 ## Security Recommendations
 
-- Немедленно отозвать прежний Google AI key и заменить значение в локальном `.env` и секретах CI/host.
+- Немедленно отозвать Telegram bot token и Google AI API key, создать новые значения и обновить локальный `.env` и секреты CI/host. Удалить раскрытые значения из Git history перед публикацией; если репозиторий уже публиковался, исходить из того, что старые значения доступны посторонним.
 - Для существующего PostgreSQL volume выполнить роль bootstrap вручную от старого superuser, затем проверить `ksp_app` без superuser и `ksp_bot` с SELECT только на нужные таблицы. Не удалять volume.
 - Подключать только реальный payment adapter с подписью провайдера, сверкой суммы/валюты и event idempotency.
 - Сгенерировать lockfile Python зависимостей, прогонять `pip-audit` и `pnpm audit` в CI.
@@ -289,8 +289,8 @@ Frontend audit: `pnpm audit --prod --json` — 0 vulnerabilities/advisories, 5 p
 | Rate limiting | PASS |
 | Race conditions | PARTIAL — one free-credit race tested on SQLite; PostgreSQL and other races NOT TESTED |
 | OpenRouter security | PASS |
-| Secrets | FAIL — rotate candidate Google AI key; Git history unavailable |
+| Secrets | FAIL — rotate Telegram and Google AI credentials; current tree clean, both prior values remain in Git history |
 | Docker security | NOT TESTED — static checks only, Docker unavailable |
 | Dependencies | NOT TESTED — Python scanner unavailable; pnpm audit had 0 findings |
 
-Итоговый статус: **HIGH RISK REMAINS** до ротации Google AI ключа. Docker/PostgreSQL и реальные payment/dependency integrations остаются непроверенными.
+Итоговый статус: **HIGH RISK REMAINS** до ротации Telegram bot token и Google AI API key и очистки опубликованной Git history. Docker/PostgreSQL и реальные payment/dependency integrations остаются непроверенными.

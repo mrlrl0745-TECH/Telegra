@@ -31,8 +31,20 @@ class User(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
     last_activity: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     is_blocked: Mapped[bool] = mapped_column(Boolean, default=False)
+    teacher_profile: Mapped["TeacherProfile | None"] = relationship(back_populates="user", cascade="all, delete-orphan", uselist=False)
     lessons: Mapped[list["LessonPlan"]] = relationship(back_populates="user", cascade="all, delete-orphan")
     templates: Mapped[list["Template"]] = relationship(back_populates="user", cascade="all, delete-orphan")
+
+
+class TeacherProfile(Base):
+    __tablename__ = "teacher_profiles"
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), primary_key=True)
+    full_name: Mapped[str] = mapped_column(String(200))
+    classes: Mapped[list[str]] = mapped_column(JSON, default=list)
+    subjects: Mapped[list[str]] = mapped_column(JSON, default=list)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+    user: Mapped[User] = relationship(back_populates="teacher_profile")
 
 
 class TelegramAuthReplay(Base):

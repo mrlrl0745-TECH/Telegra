@@ -5,6 +5,7 @@ from io import BytesIO
 import json
 import time
 from urllib.parse import urlencode
+from zipfile import ZipFile
 
 import pytest
 from docx import Document
@@ -255,6 +256,105 @@ async def test_lesson_crud_copy_and_docx_export(client, auth_headers, lesson_pay
     assert len(PdfReader(BytesIO(pdf.content)).pages) >= 1
     deleted = await client.delete(f"/api/lessons/{lesson['id']}", headers=auth_headers)
     assert deleted.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_complete_two_user_archive_copy_edit_and_download_isolation(client, auth_headers, lesson_payload, monkeypatch):
+    created = await client.post("/api/lessons/generate", headers=auth_headers, json=lesson_payload)
+    assert created.status_code == 200
+    original = created.json()
+    original_id = original["id"]
+
+    exported = await client.post(f"/api/lessons/{original_id}/export/docx", headers=auth_headers)
+    assert exported.status_code == 200
+    assert exported.content and exported.headers["content-length"] == str(len(exported.content))
+    assert ".." not in exported.headers["content-disposition"]
+    with ZipFile(BytesIO(exported.content)) as package:
+        assert package.testzip() is None
+        assert "word/document.xml" in package.namelist()
+    opened = Document(BytesIO(exported.content))
+    assert len(opened.tables) == 2
+
+    a_archive = await client.get("/api/lessons", headers=auth_headers)
+    assert [item["id"] for item in a_archive.json()] == [original_id]
+    copied = await client.post(f"/api/lessons/{original_id}/copy", headers=auth_headers)
+    assert copied.status_code == 200
+    copy_content = copied.json()["content_json"]
+    copy_content["lesson_topic"] = "Линейные уравнения: новый класс"
+    copy_content["class_name"] = "8Б"
+    copy_content["date"] = "2026-10-04"
+    copy_content["learning_objectives"] = ["8.2.2.1 решать линейные уравнения"]
+    edited = await client.put(f"/api/lessons/{copied.json()['id']}", headers=auth_headers, json=copy_content)
+    assert edited.status_code == 200
+    assert edited.json()["grade"] == "8Б"
+    assert edited.json()["lesson_date"] == "2026-10-04"
+    assert edited.json()["content_json"]["learning_objectives"] == copy_content["learning_objectives"]
+
+    monkeypatch.setattr(settings, "telegram_bot_token", "telegram-test-token")
+    other_login = await client.post("/api/auth/telegram", json={"init_data": _signed_telegram_init_data("telegram-test-token", 912345)})
+    assert other_login.status_code == 200
+    b_headers = {"Authorization": f"Bearer {other_login.json()['access_token']}"}
+    assert (await client.get("/api/lessons", headers=b_headers)).json() == []
+
+    for lesson_id in (original_id, copied.json()["id"]):
+        assert (await client.get(f"/api/lessons/{lesson_id}", headers=b_headers)).status_code == 404
+        assert (await client.put(f"/api/lessons/{lesson_id}", headers=b_headers, json=copy_content)).status_code == 404
+        assert (await client.delete(f"/api/lessons/{lesson_id}", headers=b_headers)).status_code == 404
+        assert (await client.post(f"/api/lessons/{lesson_id}/copy", headers=b_headers)).status_code == 404
+        assert (await client.post(f"/api/lessons/{lesson_id}/regenerate", headers=b_headers)).status_code == 404
+        assert (await client.post(f"/api/lessons/{lesson_id}/export/docx", headers=b_headers)).status_code == 404
+        assert (await client.post(f"/api/lessons/{lesson_id}/export/pdf", headers=b_headers)).status_code == 404
+
+    assert (await client.get(f"/api/lessons/{original_id}", headers=auth_headers)).status_code == 200
+    assert (await client.get(f"/api/lessons/{copied.json()['id']}", headers=auth_headers)).json()["topic"] == "Линейные уравнения: новый класс"
+    assert len((await client.get("/api/lessons", headers=auth_headers)).json()) == 2
+
+
+@pytest.mark.asyncio
+async def test_substitute_teacher_can_generate_and_download_a_self_contained_lesson(client, auth_headers, monkeypatch):
+    monkeypatch.setattr(settings, "ai_test_mode", False)
+    observed: dict[str, object] = {}
+
+    class Provider:
+        async def generate_json(self, messages):
+            observed["system"] = messages[0]["content"]
+            observed["request"] = json.loads(messages[1]["content"])
+            return AIResult(data={
+                "title": "КСП", "language": "ru", "section": "Не указан", "teacher_name": "ignored", "date": "ignored",
+                "subject": "Математика", "class_name": "5А", "present_count": 0, "absent_count": 0,
+                "lesson_topic": "Доли и дроби", "lesson_duration": 40, "substitute_mode": True,
+                "learning_objectives": ["Сравнивать дроби с одинаковыми знаменателями без кода"],
+                "lesson_objectives": ["Сравнить две дроби и объяснить способ сравнения"],
+                "stages": [
+                    {"stage_name": "Старт", "time": "5 минут", "teacher_actions": "Покажите карточки с дробями 1/5 и 3/5.", "student_actions": "Назовите, какая дробь больше.", "resources": "Доска", "assessment": "Устный ответ"},
+                    {"stage_name": "Практика", "time": "20 минут", "teacher_actions": "Дайте задание: сравнить 2/7 и 5/7. Ключ: 5/7 больше 2/7.", "student_actions": "Запишите знак сравнения и объясните ответ.", "resources": "Карточки", "assessment": "Критерий: верно выбран знак; дескриптор: указаны числители и объяснён общий знаменатель"},
+                    {"stage_name": "Итог", "time": "15 минут", "teacher_actions": "Соберите ответы и проведите рефлексию.", "student_actions": "Завершите фразу: теперь я умею…", "resources": "Тетрадь", "assessment": "Самооценка по цели"},
+                ],
+                "homework": "Сравнить 3/8 и 6/8, записать объяснение.", "reflection": "Назвать один освоенный приём.",
+            }, model="test-model")
+
+    monkeypatch.setattr("app.services.lesson_generator.get_ai_provider", lambda: Provider())
+    response = await client.post("/api/lessons/generate", headers=auth_headers, json={
+        "subject": "Математика", "grade": "5А", "topic": "Доли и дроби", "learning_objectives": [],
+        "lesson_objectives": [], "lesson_duration": 40, "substitute_mode": True,
+    })
+    assert response.status_code == 200, response.text
+    lesson = response.json()
+    content = lesson["content_json"]
+    assert observed["request"]["substitute_mode"] is True
+    assert "Режим учителя на замене" in observed["system"]
+    assert content["substitute_mode"] is True
+    assert sum(int(stage["time"].split()[0]) for stage in content["stages"]) == 40
+    assert "Ключ: 5/7 больше 2/7" in content["stages"][1]["teacher_actions"]
+    assert lesson["teacher_name"] == "Учитель на замене"
+    archive = await client.get("/api/lessons", headers=auth_headers)
+    assert [item["id"] for item in archive.json()] == [lesson["id"]]
+
+    exported = await client.post(f"/api/lessons/{lesson['id']}/export/docx", headers=auth_headers)
+    assert exported.status_code == 200
+    rendered = Document(BytesIO(exported.content))
+    document_text = " ".join(paragraph.text for paragraph in rendered.paragraphs) + " " + " ".join(cell.text for table in rendered.tables for row in table.rows for cell in row.cells)
+    assert "Ключ: 5/7 больше 2/7" in document_text
 
 
 @pytest.mark.asyncio

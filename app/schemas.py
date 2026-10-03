@@ -1,7 +1,7 @@
-from datetime import datetime
+from datetime import date, datetime
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class UserOut(BaseModel):
@@ -31,19 +31,61 @@ class TokenOut(BaseModel):
     user: UserOut
 
 
+class TeacherProfileIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    full_name: str = Field(min_length=3, max_length=200)
+    classes: list[str] = Field(min_length=1, max_length=20)
+    subjects: list[str] = Field(min_length=1, max_length=30)
+
+    @field_validator("full_name")
+    @classmethod
+    def clean_full_name(cls, value: str) -> str:
+        value = " ".join(value.split())
+        if len(value) < 3:
+            raise ValueError("Укажите ФИО полностью")
+        return value
+
+    @field_validator("classes", "subjects")
+    @classmethod
+    def clean_items(cls, values: list[str]) -> list[str]:
+        cleaned: list[str] = []
+        seen: set[str] = set()
+        for raw_value in values:
+            value = " ".join(raw_value.split())
+            if not value or len(value) > 80:
+                raise ValueError("Каждое значение должно содержать от 1 до 80 символов")
+            key = value.casefold()
+            if key not in seen:
+                seen.add(key)
+                cleaned.append(value)
+        if not cleaned:
+            raise ValueError("Добавьте хотя бы одно значение")
+        return cleaned
+
+
+class TeacherProfileOut(BaseModel):
+    user_id: str
+    full_name: str
+    classes: list[str]
+    subjects: list[str]
+
+    model_config = ConfigDict(from_attributes=True)
+
+
 class LessonInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    teacher_name: str = Field(min_length=2, max_length=200)
-    lesson_date: str = Field(min_length=1, max_length=40)
+    teacher_name: str = Field(default="Учитель на замене", min_length=2, max_length=200)
+    lesson_date: str = Field(default_factory=lambda: date.today().isoformat(), min_length=1, max_length=40)
     subject: str = Field(min_length=2, max_length=160)
-    section: str = Field(min_length=1, max_length=300)
+    section: str = Field(default="", max_length=300)
     grade: str = Field(min_length=1, max_length=40)
-    present_count: int = Field(ge=0, le=1000)
-    absent_count: int = Field(ge=0, le=1000)
-    topic: str = Field(min_length=2, max_length=300)
-    learning_objectives: list[str] = Field(min_length=1, max_length=10)
-    lesson_objectives: list[str] = Field(min_length=1, max_length=10)
+    present_count: int = Field(default=0, ge=0, le=1000)
+    absent_count: int = Field(default=0, ge=0, le=1000)
+    topic: str = Field(default="", max_length=300)
+    learning_objectives: list[str] = Field(default_factory=list, max_length=10)
+    lesson_objectives: list[str] = Field(default_factory=list, max_length=10)
     lesson_duration: int = Field(default=45, ge=20, le=120)
     lesson_type: str = Field(default="Комбинированный урок", max_length=100)
     class_level: str = Field(default="Средний", max_length=100)
@@ -58,16 +100,20 @@ class LessonInput(BaseModel):
     homework_required: bool = True
     reflection_required: bool = True
     interactive_tasks: bool = False
+    substitute_mode: bool = False
     additional_requirements: str = Field(default="", max_length=3000)
     template_id: str | None = None
 
     @field_validator("learning_objectives", "lesson_objectives")
     @classmethod
     def clean_objectives(cls, values: list[str]) -> list[str]:
-        cleaned = [value.strip()[:500] for value in values if value.strip()]
-        if not cleaned:
-            raise ValueError("Укажите хотя бы одну цель")
-        return cleaned
+        return [value.strip()[:500] for value in values if value.strip()]
+
+    @model_validator(mode="after")
+    def require_topic_or_learning_objective(self):
+        if not self.topic.strip() and not self.learning_objectives:
+            raise ValueError("Укажите тему урока или цель обучения")
+        return self
 
 
 class LessonStageOut(BaseModel):
@@ -92,6 +138,8 @@ class LessonContent(BaseModel):
     present_count: int = Field(ge=0, le=1000)
     absent_count: int = Field(ge=0, le=1000)
     lesson_topic: str = Field(min_length=1, max_length=300)
+    lesson_duration: int = Field(default=45, ge=20, le=120)
+    substitute_mode: bool = False
     learning_objectives: list[str] = Field(min_length=1, max_length=10)
     lesson_objectives: list[str] = Field(min_length=1, max_length=10)
     stages: list[LessonStageOut] = Field(min_length=2, max_length=14)

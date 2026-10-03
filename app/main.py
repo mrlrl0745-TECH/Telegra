@@ -17,8 +17,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.database import engine, get_db
-from app.models import AIRequest, Base, GenerationUsage, LessonPlan, LessonStage, Payment, Subscription, TelegramAuthReplay, Template, User, utcnow
-from app.schemas import AdminBlockIn, AdminCreditsIn, AdminSubscriptionIn, LessonContent, LessonInput, LessonOut, PaymentCreateIn, PaymentOut, TelegramAuthIn, TemplateOut, TokenOut, UserOut
+from app.models import AIRequest, Base, GenerationUsage, LessonPlan, LessonStage, Payment, Subscription, TeacherProfile, TelegramAuthReplay, Template, User, utcnow
+from app.schemas import AdminBlockIn, AdminCreditsIn, AdminSubscriptionIn, LessonContent, LessonInput, LessonOut, PaymentCreateIn, PaymentOut, TeacherProfileIn, TeacherProfileOut, TelegramAuthIn, TemplateOut, TokenOut, UserOut
 from app.security import create_access_token, get_current_user, require_admin, telegram_init_data_fingerprint, validate_telegram_init_data
 from app.services.ai_types import AIProviderError
 from app.services.document_service import DocumentService
@@ -335,6 +335,27 @@ async def get_me(user: User = Depends(get_current_user)):
     return UserOut.model_validate(user).model_copy(update={"is_admin": user.telegram_user_id in settings.admin_ids})
 
 
+@app.get("/api/users/profile", response_model=TeacherProfileOut | None, tags=["users"], summary="Профиль учителя")
+async def get_teacher_profile(user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    return await db.get(TeacherProfile, user.id)
+
+
+@app.put("/api/users/profile", response_model=TeacherProfileOut, tags=["users"], summary="Сохранить профиль учителя")
+async def save_teacher_profile(payload: TeacherProfileIn, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    profile = await db.get(TeacherProfile, user.id)
+    if profile is None:
+        profile = TeacherProfile(user_id=user.id, full_name=payload.full_name, classes=payload.classes, subjects=payload.subjects)
+        db.add(profile)
+    else:
+        profile.full_name = payload.full_name
+        profile.classes = payload.classes
+        profile.subjects = payload.subjects
+        profile.updated_at = utcnow()
+    await db.commit()
+    await db.refresh(profile)
+    return profile
+
+
 @app.get("/api/users/usage", tags=["users"], summary="Лимит, подписка и количество КСП")
 async def usage(user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     total = await db.scalar(select(func.count()).select_from(LessonPlan).where(LessonPlan.user_id == user.id)) or 0
@@ -422,6 +443,7 @@ async def update_lesson(lesson_id: str, content: LessonContent, user: User = Dep
     if not plan:
         raise HTTPException(status_code=404, detail="КСП не найден")
     try:
+        LessonGenerator.normalize_stage_times(content, content.lesson_duration)
         DocumentService.to_docx(content)
         DocumentService.to_pdf(content)
     except Exception as exc:
@@ -485,7 +507,8 @@ async def regenerate_lesson(lesson_id: str, user: User = Depends(get_current_use
         teacher_name=old.teacher_name, lesson_date=old.date, subject=old.subject, section=old.section, grade=old.class_name,
         present_count=old.present_count, absent_count=old.absent_count, topic=old.lesson_topic,
         learning_objectives=old.learning_objectives, lesson_objectives=old.lesson_objectives, language=plan.language,
-        lesson_duration=45, homework_required=bool(old.homework), reflection_required=bool(old.reflection),
+        lesson_duration=old.lesson_duration, substitute_mode=old.substitute_mode,
+        homework_required=bool(old.homework), reflection_required=bool(old.reflection),
     )
     try:
         result = await LessonGenerator().generate(payload, LessonGenerator.standard_structure())
@@ -519,9 +542,14 @@ async def export_docx(lesson_id: str, user: User = Depends(get_current_user), db
     except Exception as exc:
         logger.warning("DOCX export failed (%s)", type(exc).__name__)
         raise HTTPException(status_code=500, detail="Не удалось сформировать DOCX") from exc
+    DocumentService.validate_docx(file)
     safe_topic = "".join(ch for ch in plan.topic if ch.isalnum() or ch in " -_")[:60].strip().replace(" ", "-") or "ksp"
-    ascii_filename = quote(f"ksp-{safe_topic}.docx")
-    return StreamingResponse(iter([file]), media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document", headers={"Content-Disposition": f"attachment; filename*=UTF-8''{ascii_filename}"})
+    filename = quote(f"ksp-{safe_topic}.docx", safe="")
+    return StreamingResponse(
+        iter([file]),
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{filename}", "Content-Length": str(len(file))},
+    )
 
 
 @app.post("/api/lessons/{lesson_id}/export/pdf", tags=["lessons"], summary="Скачать PDF с таблицей по образцу")
@@ -534,9 +562,14 @@ async def export_pdf(lesson_id: str, user: User = Depends(get_current_user), db:
     except Exception as exc:
         logger.warning("PDF export failed (%s)", type(exc).__name__)
         raise HTTPException(status_code=500, detail="Не удалось сформировать PDF") from exc
+    if not file or not file.startswith(b"%PDF-"):
+        raise HTTPException(status_code=500, detail="Не удалось сформировать PDF")
     safe_topic = "".join(ch for ch in plan.topic if ch.isalnum() or ch in " -_")[:60].strip().replace(" ", "-") or "ksp"
-    ascii_filename = quote(f"ksp-{safe_topic}.pdf")
-    return StreamingResponse(iter([file]), media_type="application/pdf", headers={"Content-Disposition": f"attachment; filename*=UTF-8''{ascii_filename}"})
+    filename = quote(f"ksp-{safe_topic}.pdf", safe="")
+    return StreamingResponse(
+        iter([file]), media_type="application/pdf",
+        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{filename}", "Content-Length": str(len(file))},
+    )
 
 
 @app.get("/api/templates", response_model=list[TemplateOut], tags=["templates"], summary="Мои шаблоны")
@@ -596,7 +629,12 @@ async def delete_template(template_id: str, user: User = Depends(get_current_use
 async def subscription(user: User = Depends(get_current_user)):
     active = _is_subscription_active(user)
     status = "expired" if user.subscription_status == "active" and not active else user.subscription_status
-    return {"active": active, "status": status, "type": user.subscription_type, "end_date": user.subscription_end, "tariffs": [{"type": "monthly", "price": 750, "currency": "KZT"}, {"type": "yearly", "price": 5500, "currency": "KZT"}]}
+    test_mode_available = settings.app_env == "development" and settings.payment_test_mode
+    return {
+        "active": active, "status": status, "type": user.subscription_type, "end_date": user.subscription_end,
+        "test_mode_available": test_mode_available, "payments_available": test_mode_available,
+        "tariffs": [{"type": "monthly", "price": 750, "currency": "KZT"}, {"type": "yearly", "price": 5500, "currency": "KZT"}],
+    }
 
 
 @app.post("/api/payments/create", response_model=PaymentOut, tags=["payments"], summary="Создать платёж на тариф")

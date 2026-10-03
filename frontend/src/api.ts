@@ -2,13 +2,21 @@ export type Stage = { stage_name: string; time: string; teacher_actions: string;
 export type Lesson = {
   id: string; subject: string; section: string; grade: string; topic: string; lesson_date: string; teacher_name: string
   present_count: number; absent_count: number; learning_objectives: string[]; lesson_objectives: string[]
-  content_json: { title: string; language: 'ru' | 'kk'; section: string; teacher_name: string; date: string; subject: string; class_name: string; present_count: number; absent_count: number; lesson_topic: string; learning_objectives: string[]; lesson_objectives: string[]; stages: Stage[]; homework: string; reflection: string }
+  content_json: { title: string; language: 'ru' | 'kk'; section: string; teacher_name: string; date: string; subject: string; class_name: string; present_count: number; absent_count: number; lesson_topic: string; lesson_duration: number; substitute_mode: boolean; learning_objectives: string[]; lesson_objectives: string[]; stages: Stage[]; homework: string; reflection: string }
   language: string; created_at: string; updated_at: string
 }
-export type Template = { id: string; name: string; file_type: string; template_structure: Record<string, any>; created_at: string }
-export type User = { id: string; telegram_user_id: number; first_name: string; last_name: string; free_generations: number; subscription_status: string; subscription_type?: string | null; subscription_end?: string | null; is_admin: boolean; is_blocked: boolean }
+export type Template = { id: string; name: string; file_type: string; template_structure: { analysis_status?: string; tables?: unknown[]; [key: string]: unknown }; created_at: string }
+export type User = { id: string; telegram_user_id: number; first_name: string; last_name: string; language: string; free_generations: number; subscription_status: string; subscription_type?: string | null; subscription_end?: string | null; is_admin: boolean; is_blocked: boolean }
+export type TeacherProfile = { user_id: string; full_name: string; classes: string[]; subjects: string[] }
 export type AdminStats = Record<string, number>
 export type Usage = { free_generations: number; free_generations_total: number; subscription_active: boolean; subscription_status: string; subscription_type: string | null; subscription_end: string | null; lessons_created: number }
+export type LessonGenerateInput = {
+  teacher_name: string; lesson_date: string; subject: string; section: string; grade: string; present_count: number; absent_count: number; topic: string
+  learning_objectives: string[]; lesson_objectives: string[]; lesson_duration: number; lesson_type: string; class_level: string; students_count: number
+  language: 'ru' | 'kk'; difficulty: string; work_formats: string[]; pair_work: boolean; group_work: boolean; individual_work: boolean; differentiation: boolean
+  homework_required: boolean; reflection_required: boolean; interactive_tasks: boolean; substitute_mode: boolean; additional_requirements: string; template_id: string | null
+}
+export type SubscriptionInfo = { active: boolean; status: string; type: string | null; end_date: string | null; payments_available: boolean; test_mode_available: boolean; tariffs: { type: string; price: number; currency: string }[] }
 const base = import.meta.env.VITE_API_URL || 'http://localhost:8000'
 
 try {
@@ -42,14 +50,27 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   return response.json()
 }
 
+async function requestBlob(path: string, expectedType: string): Promise<Blob> {
+  const headers = new Headers()
+  if (token) headers.set('Authorization', `Bearer ${token}`)
+  const response = await fetch(`${base}${path}`, { method: 'POST', headers })
+  if (!response.ok) throw new Error(response.status === 404 ? 'КСП не найден или у вас нет к нему доступа' : 'Не удалось скачать документ')
+  if (!response.headers.get('content-type')?.includes(expectedType)) throw new Error('Сервер вернул файл неверного формата')
+  const blob = await response.blob()
+  if (!blob.size) throw new Error('Сформированный файл пуст')
+  return blob
+}
+
 export const api = {
   authTelegram: (init_data: string) => request<{ access_token: string; user: User }>('/api/auth/telegram', { method: 'POST', body: JSON.stringify({ init_data }) }),
   authDev: () => request<{ access_token: string; user: User }>('/api/auth/dev', { method: 'POST' }),
   me: () => request<User>('/api/users/me'),
+  teacherProfile: () => request<TeacherProfile | null>('/api/users/profile'),
+  saveTeacherProfile: (data: Pick<TeacherProfile, 'full_name' | 'classes' | 'subjects'>) => request<TeacherProfile>('/api/users/profile', { method: 'PUT', body: JSON.stringify(data) }),
   usage: () => request<Usage>('/api/users/usage'),
   lessons: () => request<Lesson[]>('/api/lessons'),
   lesson: (id: string) => request<Lesson>(`/api/lessons/${id}`),
-  generate: (data: Record<string, unknown>) => request<Lesson>('/api/lessons/generate', { method: 'POST', body: JSON.stringify(data) }),
+  generate: (data: LessonGenerateInput) => request<Lesson>('/api/lessons/generate', { method: 'POST', body: JSON.stringify(data) }),
   updateLesson: (id: string, data: Lesson['content_json']) => request<Lesson>(`/api/lessons/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
   regenerate: (id: string) => request<Lesson>(`/api/lessons/${id}/regenerate`, { method: 'POST' }),
   deleteLesson: (id: string) => request<{ ok: boolean }>(`/api/lessons/${id}`, { method: 'DELETE' }),
@@ -57,7 +78,7 @@ export const api = {
   templates: () => request<Template[]>('/api/templates'),
   uploadTemplate: (name: string, file: File) => { const data = new FormData(); data.append('name', name); data.append('file', file); return request<Template>('/api/templates', { method: 'POST', body: data }) },
   deleteTemplate: (id: string) => request<{ ok: boolean }>(`/api/templates/${id}`, { method: 'DELETE' }),
-  subscription: () => request<{ active: boolean; status: string; type: string | null; end_date: string | null; tariffs: { type: string; price: number; currency: string }[] }>('/api/subscription'),
+  subscription: () => request<SubscriptionInfo>('/api/subscription'),
   createPayment: (tariff: 'monthly' | 'yearly') => request<{ id: string; amount: number; currency: string; status: string; tariff: string }>('/api/payments/create', { method: 'POST', body: JSON.stringify({ tariff }) }),
   simulatePayment: (id: string, status: string) => request<{ id: string; status: string }>(`/api/payments/${id}/simulate?status=${status}`, { method: 'POST' }),
   adminStats: () => request<AdminStats>('/api/admin/statistics'),
@@ -67,14 +88,6 @@ export const api = {
   adminCredits: (id: string, amount = 3) => request(`/api/admin/users/${id}/credits`, { method: 'POST', body: JSON.stringify({ amount }) }),
   adminBlock: (id: string, blocked: boolean) => request(`/api/admin/users/${id}/block`, { method: 'PUT', body: JSON.stringify({ blocked }) }),
   adminSubscription: (id: string, type: 'monthly' | 'yearly') => request(`/api/admin/users/${id}/subscription`, { method: 'POST', body: JSON.stringify({ type }) }),
-  async exportDocx(id: string) {
-    const response = await fetch(`${base}/api/lessons/${id}/export/docx`, { headers: token ? { Authorization: `Bearer ${token}` } : {} })
-    if (!response.ok) throw new Error('Не удалось скачать DOCX')
-    return response.blob()
-  },
-  async exportPdf(id: string) {
-    const response = await fetch(`${base}/api/lessons/${id}/export/pdf`, { method: 'POST', headers: token ? { Authorization: `Bearer ${token}` } : {} })
-    if (!response.ok) throw new Error('Не удалось скачать PDF')
-    return response.blob()
-  },
+  exportDocx: (id: string) => requestBlob(`/api/lessons/${id}/export/docx`, 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'),
+  exportPdf: (id: string) => requestBlob(`/api/lessons/${id}/export/pdf`, 'application/pdf'),
 }
