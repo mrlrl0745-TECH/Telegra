@@ -1,5 +1,6 @@
 import json
 import logging
+from typing import Any, Callable
 
 import httpx
 
@@ -14,8 +15,12 @@ OpenRouterError = AIProviderError
 
 
 class OpenRouterService:
-    def __init__(self) -> None:
+    """OpenRouter free-model fallback. Base URL only, endpoint is built in code."""
+
+    def __init__(self, client_factory: Callable[..., Any] | None = None) -> None:
+        self._client_factory = client_factory or httpx.AsyncClient
         self.base_url = settings.openrouter_base_url.rstrip("/")
+        self.response_schema: dict[str, Any] | None = None
 
     async def generate(self, messages: list[dict[str, str]]) -> AIResult:
         if not settings.openrouter_api_key or not settings.openrouter_model:
@@ -26,15 +31,17 @@ class OpenRouterService:
             "HTTP-Referer": settings.app_url,
             "X-Title": settings.app_name,
         }
+        if self.response_schema:
+            messages = [*messages, {"role": "system", "content": "Return exactly this JSON schema: " + json.dumps(self.response_schema, ensure_ascii=False)}]
         payload = {
             "model": settings.openrouter_model,
             "messages": messages,
             "response_format": {"type": "json_object"},
-            "temperature": 0.65,
-            "max_tokens": 5000,
+            "temperature": 0.3,
+            "max_tokens": 4200,
         }
         try:
-            async with httpx.AsyncClient(timeout=settings.openrouter_timeout) as client:
+            async with self._client_factory(timeout=min(settings.openrouter_timeout, settings.ai_fallback_timeout)) as client:
                 response = await client.post(f"{self.base_url}/chat/completions", headers=headers, json=payload)
         except httpx.TimeoutException as exc:
             raise OpenRouterError("timeout") from exc
@@ -51,8 +58,13 @@ class OpenRouterService:
             raise OpenRouterError("provider_error")
         try:
             body = response.json()
-            content = body["choices"][0]["message"]["content"]
+            choice = body["choices"][0]
+            if choice.get("finish_reason", "stop") != "stop":
+                raise OpenRouterError("incomplete_response")
+            content = choice["message"]["content"]
             data = json.loads(content)
+            if not isinstance(data, dict):
+                raise ValueError("Expected object")
             usage = body.get("usage") or {}
             return AIResult(
                 data=data,
@@ -65,20 +77,7 @@ class OpenRouterService:
             raise OpenRouterError("invalid_response") from exc
 
     async def generate_json(self, messages: list[dict[str, str]]) -> AIResult:
-        last_error: OpenRouterError | None = None
-        current = list(messages)
-        for attempt in range(2):
-            try:
-                return await self.generate(current)
-            except OpenRouterError as exc:
-                last_error = exc
-                if exc.code != "invalid_response" or attempt:
-                    raise
-                current = current + [
-                    {"role": "assistant", "content": "Предыдущий ответ не был корректным JSON."},
-                    {"role": "user", "content": "Повтори ответ как один корректный JSON-объект без Markdown и комментариев."},
-                ]
-        raise last_error or OpenRouterError("invalid_response")
+        return await self.generate(messages)
 
     async def test_connection(self) -> dict[str, str | bool]:
         result = await self.generate_json([

@@ -18,6 +18,7 @@ class GoogleAIService:
 
     def __init__(self, client_factory: Callable[..., Any] | None = None) -> None:
         self._client_factory = client_factory or httpx.AsyncClient
+        self.response_schema: dict[str, Any] | None = None
 
     @staticmethod
     def _to_gemini_contents(messages: list[dict[str, str]]) -> tuple[list[dict[str, Any]], str | None]:
@@ -46,17 +47,23 @@ class GoogleAIService:
             "contents": contents,
             "generationConfig": {
                 "responseMimeType": "application/json",
-                "temperature": 0.65,
-                "maxOutputTokens": 5000,
+                "temperature": 0.3,
+                "maxOutputTokens": 4200,
             },
         }
+        if self.response_schema:
+            payload["generationConfig"]["responseJsonSchema"] = self.response_schema
+        if settings.google_ai_model.startswith("gemini-2.5-flash"):
+            payload["generationConfig"]["thinkingConfig"] = {"thinkingBudget": 0}
+        elif settings.google_ai_model.startswith("gemini-3") and "flash" in settings.google_ai_model:
+            payload["generationConfig"]["thinkingConfig"] = {"thinkingLevel": "minimal" if "flash-lite" in settings.google_ai_model else "low"}
         if system_instruction:
             payload["systemInstruction"] = {"parts": [{"text": system_instruction}]}
         model = quote(settings.google_ai_model, safe="-._")
         url = f"{self.API_BASE_URL}/models/{model}:generateContent"
         headers = {"x-goog-api-key": settings.google_ai_api_key, "Content-Type": "application/json"}
         try:
-            async with self._client_factory(timeout=settings.openrouter_timeout, follow_redirects=False) as client:
+            async with self._client_factory(timeout=min(settings.openrouter_timeout, settings.ai_primary_timeout), follow_redirects=False) as client:
                 response = await client.post(url, headers=headers, json=payload)
         except httpx.TimeoutException:
             raise AIProviderError("timeout") from None
@@ -73,8 +80,11 @@ class GoogleAIService:
             raise AIProviderError("provider_error")
         try:
             body = response.json()
-            parts = body["candidates"][0]["content"]["parts"]
-            response_text = "".join(part["text"] for part in parts if isinstance(part, dict) and isinstance(part.get("text"), str))
+            candidate = body["candidates"][0]
+            if candidate.get("finishReason", "STOP") != "STOP":
+                raise AIProviderError("incomplete_response")
+            parts = candidate["content"]["parts"]
+            response_text = "".join(part["text"] for part in parts if isinstance(part, dict) and not part.get("thought") and isinstance(part.get("text"), str))
             data = json.loads(response_text)
             if not isinstance(data, dict):
                 raise ValueError("Expected JSON object")
@@ -89,16 +99,8 @@ class GoogleAIService:
             raise AIProviderError("invalid_response") from None
 
     async def generate_json(self, messages: list[dict[str, str]]) -> AIResult:
-        try:
-            return await self.generate(messages)
-        except AIProviderError as exc:
-            if exc.code != "invalid_response":
-                raise
-        retry_messages = list(messages) + [
-            {"role": "assistant", "content": "Предыдущий ответ не был корректным JSON."},
-            {"role": "user", "content": "Повтори ответ как один корректный JSON-объект без Markdown и комментариев."},
-        ]
-        return await self.generate(retry_messages)
+        # Retry policy lives in AIService; never multiply requests inside the adapter.
+        return await self.generate(messages)
 
     async def test_connection(self) -> dict[str, str | bool]:
         result = await self.generate_json([

@@ -25,6 +25,8 @@ from app.services.document_service import DocumentService
 from app.services.lesson_generator import LessonGenerator, get_ai_provider
 from app.services.payment_service import payment_service
 from app.services.template_service import TemplateService, get_owned_template
+from app.services.practice_service import generate_practice
+from app.schemas import PracticeTasks
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 logger = logging.getLogger("ksp")
@@ -129,7 +131,11 @@ async def root():
 
 allowed_origins = {settings.frontend_url.rstrip("/")}
 if settings.app_env == "development":
-    allowed_origins.update({"http://localhost:5173", "http://127.0.0.1:5173"})
+    allowed_origins.update({
+        "http://localhost:5173", "http://127.0.0.1:5173",
+        "http://localhost:3000", "http://127.0.0.1:3000",
+        "http://localhost:3001", "http://127.0.0.1:3001",
+    })
 app.add_middleware(
     CORSMiddleware,
     allow_origins=sorted(allowed_origins),
@@ -160,7 +166,7 @@ async def security_and_rate_limits(request: Request, call_next):
 
         if path in {"/api/auth/telegram", "/api/auth/dev"}:
             scope, limit = "auth", 12
-        elif path == "/api/lessons/generate" or (path.endswith("/regenerate") and path.startswith("/api/lessons/")):
+        elif path == "/api/lessons/generate" or (path.endswith(("/regenerate", "/tasks")) and path.startswith("/api/lessons/")):
             scope, limit = "ai", 8
         elif path == "/api/templates" and request.method == "POST":
             scope, limit = "upload", 10
@@ -404,7 +410,7 @@ async def generate_lesson(payload: LessonInput, user: User = Depends(get_current
         logger.warning("KSP generation failed (%s)", exc.code)
         db.add(AIRequest(user_id=user_id, model=settings.active_ai_model or "test-mode", status="error", error_code=exc.code))
         await db.commit()
-        raise HTTPException(status_code=503, detail="Не удалось создать КСП. Проверьте настройки AI или попробуйте ещё раз.") from exc
+        raise HTTPException(status_code=503, detail="AI-помощник временно недоступен.\nПопробуйте повторить запрос через несколько секунд.") from exc
     except Exception as exc:
         await db.rollback()
         logger.warning("KSP validation or document rendering failed (%s)", type(exc).__name__)
@@ -416,6 +422,33 @@ async def generate_lesson(payload: LessonInput, user: User = Depends(get_current
     db.add(plan)
     await db.flush()
     await _save_stages(db, plan.id, content)
+    db.add(GenerationUsage(user_id=user_id, lesson_id=plan.id, was_free=was_free))
+    db.add(AIRequest(user_id=user_id, model=result.model, status="success", prompt_tokens=result.prompt_tokens, completion_tokens=result.completion_tokens, cost=result.cost))
+    await db.commit()
+    await db.refresh(plan)
+    return plan
+
+
+@app.post("/api/lessons/{lesson_id}/tasks", response_model=LessonOut, tags=["lessons"])
+async def create_practice_tasks(lesson_id: str, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    user_id = user.id
+    locked_user = await _lock_user_for_ai(db, user_id)
+    if not locked_user or locked_user.is_blocked:
+        raise HTTPException(status_code=403, detail="Доступ к аккаунту ограничен")
+    plan = await db.scalar(select(LessonPlan).where(LessonPlan.id == lesson_id, LessonPlan.user_id == user_id).with_for_update())
+    if not plan:
+        raise HTTPException(status_code=404, detail="КСП не найден")
+    await _enforce_ai_quota(db, user_id)
+    was_free = not _is_subscription_active(locked_user)
+    if was_free:
+        await _consume_free_generation(db, user_id)
+    try:
+        result = await generate_practice(LessonContent.model_validate(plan.content_json))
+        tasks = PracticeTasks.model_validate(result.data)
+    except Exception as exc:
+        await db.rollback()
+        raise HTTPException(status_code=503, detail="Не удалось создать задания. Попробуйте ещё раз. Генерация не списана.") from exc
+    plan.content_json = {**plan.content_json, 'practice_tasks': [task.model_dump() for task in tasks.tasks]}
     db.add(GenerationUsage(user_id=user_id, lesson_id=plan.id, was_free=was_free))
     db.add(AIRequest(user_id=user_id, model=result.model, status="success", prompt_tokens=result.prompt_tokens, completion_tokens=result.completion_tokens, cost=result.cost))
     await db.commit()
@@ -442,6 +475,8 @@ async def update_lesson(lesson_id: str, content: LessonContent, user: User = Dep
     plan = await db.scalar(select(LessonPlan).where(LessonPlan.id == lesson_id, LessonPlan.user_id == user.id).with_for_update())
     if not plan:
         raise HTTPException(status_code=404, detail="КСП не найден")
+    # Tasks are managed separately; an older editor must not erase a newer set.
+    content.practice_tasks = LessonContent.model_validate(plan.content_json).practice_tasks
     try:
         LessonGenerator.normalize_stage_times(content, content.lesson_duration)
         DocumentService.to_docx(content)
@@ -520,7 +555,7 @@ async def regenerate_lesson(lesson_id: str, user: User = Depends(get_current_use
         logger.warning("KSP variant generation failed (%s)", type(exc).__name__)
         db.add(AIRequest(user_id=user.id, model=settings.active_ai_model or "test-mode", status="error", error_code="variant_generation_failed"))
         await db.commit()
-        raise HTTPException(status_code=503, detail="Не удалось создать другой вариант. Попробуйте ещё раз.") from exc
+        raise HTTPException(status_code=503, detail="AI-помощник временно недоступен.\nПопробуйте повторить запрос через несколько секунд.") from exc
     _sync_lesson_fields(plan, content)
     await db.execute(LessonStage.__table__.delete().where(LessonStage.lesson_id == lesson_id))
     await _save_stages(db, plan.id, content)

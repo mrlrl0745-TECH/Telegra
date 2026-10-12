@@ -21,11 +21,14 @@ class Settings(BaseSettings):
     bot_username: str = ""
     ai_provider: Literal["google", "openrouter"] = "google"
     google_ai_api_key: str = ""
-    google_ai_model: str = "gemini-3.8-flash"
+    google_ai_model: str = "gemini-3.5-flash-lite"
     openrouter_api_key: str = ""
-    openrouter_model: str = ""
+    openrouter_model: str = "openrouter/free"
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
     openrouter_timeout: int = Field(default=90, ge=1, le=180)
+    ai_primary_timeout: float = Field(default=15, ge=1, le=30)
+    ai_fallback_timeout: float = Field(default=8, ge=1, le=20)
+    ai_total_timeout: float = Field(default=24, ge=2, le=45)
     ai_test_mode: bool = False
     dev_auth_enabled: bool = False
     payment_test_mode: bool = False

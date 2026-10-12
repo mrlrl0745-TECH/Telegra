@@ -1,8 +1,9 @@
+export type PracticeTask = { question: string; answer: string; assessment: string }
 export type Stage = { stage_name: string; time: string; teacher_actions: string; student_actions: string; resources: string; assessment: string }
 export type Lesson = {
   id: string; subject: string; section: string; grade: string; topic: string; lesson_date: string; teacher_name: string
   present_count: number; absent_count: number; learning_objectives: string[]; lesson_objectives: string[]
-  content_json: { title: string; language: 'ru' | 'kk'; section: string; teacher_name: string; date: string; subject: string; class_name: string; present_count: number; absent_count: number; lesson_topic: string; lesson_duration: number; substitute_mode: boolean; learning_objectives: string[]; lesson_objectives: string[]; stages: Stage[]; homework: string; reflection: string }
+  content_json: { title: string; language: 'ru' | 'kk'; section: string; teacher_name: string; date: string; subject: string; class_name: string; present_count: number; absent_count: number; lesson_topic: string; lesson_duration: number; substitute_mode: boolean; learning_objectives: string[]; lesson_objectives: string[]; stages: Stage[]; homework: string; reflection: string; school?: string; language_objectives?: string; differentiation_plan?: string; assessment_plan?: string; cross_curricular_links?: string; health_and_safety?: string; practice_tasks?: PracticeTask[] }
   language: string; created_at: string; updated_at: string
 }
 export type Template = { id: string; name: string; file_type: string; template_structure: { analysis_status?: string; tables?: unknown[]; [key: string]: unknown }; created_at: string }
@@ -71,6 +72,7 @@ export const api = {
   lessons: () => request<Lesson[]>('/api/lessons'),
   lesson: (id: string) => request<Lesson>(`/api/lessons/${id}`),
   generate: (data: LessonGenerateInput) => request<Lesson>('/api/lessons/generate', { method: 'POST', body: JSON.stringify(data) }),
+  practiceTasks: (id: string) => request<Lesson>(`/api/lessons/${id}/tasks`, { method: 'POST' }),
   updateLesson: (id: string, data: Lesson['content_json']) => request<Lesson>(`/api/lessons/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
   regenerate: (id: string) => request<Lesson>(`/api/lessons/${id}/regenerate`, { method: 'POST' }),
   deleteLesson: (id: string) => request<{ ok: boolean }>(`/api/lessons/${id}`, { method: 'DELETE' }),

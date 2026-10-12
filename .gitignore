@@ -2,6 +2,8 @@
 .env.*
 !.env.example
 !frontend/.env.example
+!frontend/.env.development.user
+!frontend/.env.development.admin
 .venv/
 venv/
 __pycache__/

@@ -1,9 +1,9 @@
 import json
-import asyncio
 import re
 from typing import Any
 
 from pydantic import ValidationError
+from app.services.ai_service import generate_ai_response
 
 from app.config import settings
 from app.schemas import LessonContent, LessonInput
@@ -16,6 +16,18 @@ def get_ai_provider() -> GoogleAIService | OpenRouterService:
     if settings.ai_provider == "google":
         return GoogleAIService()
     return OpenRouterService()
+
+
+def lesson_output_schema() -> dict[str, Any]:
+    # Only pedagogical content is generated. Trusted metadata is restored locally.
+    schema = LessonContent.model_json_schema()
+    fields = {"title", "learning_objectives", "lesson_objectives", "stages", "homework", "reflection", "language_objectives", "differentiation_plan", "assessment_plan", "cross_curricular_links", "health_and_safety"}
+    schema["properties"] = {key: value for key, value in schema["properties"].items() if key in fields}
+    schema["required"] = list(schema["properties"])
+    schema["properties"]["stages"].update(minItems=4, maxItems=5)
+    schema["properties"]["reflection"]["description"] = "Инструкция для будущей рефлексии: 2 конкретных вопроса ученику. Урок ещё не состоялся; не утверждай, что ученики усвоили материал или успешно выполнили задания."
+    schema["properties"]["homework"]["description"] = "Полные условия домашних упражнений и правильные ответы для педагога, без выдуманных номеров страниц учебника."
+    return schema
 
 
 class LessonGenerator:
@@ -57,57 +69,56 @@ class LessonGenerator:
                 "какое задание выдать, сколько времени дать и как проверить ответ. Включи ключи ответов, "
                 "чтобы план можно было провести без дополнительной подготовки."
             )
+        system += " Составь 4–5 этапов, общий объём 450–650 слов. Пиши компактно: конкретные задания и ответы вместо повторов и общих фраз. Не создавай дополнительные поля вне схемы. Для дифференциации и домашней работы укажи сами упражнения с ответами; не пиши «дать дополнительное задание» без его содержания."
+        system += " Это план будущего урока, не отчёт о проведённом. Рефлексия — только вопросы/инструкции, без утверждений об успехах учеников. Используй формативное оценивание с конкретными дескрипторами, не объявляй суммативное оценивание. Проверь вычисления и единицы: единица скорости СИ — м/с; км/ч вне СИ."
+        if lesson.differentiation:
+            system += " Дифференциация обязательна в практическом этапе: укажи конкретную подсказку для поддержки и одно полностью сформулированное усложнённое задание с ответом."
+        system += " Объединённый шаблон: language_objectives — термины и одна речевая конструкция; differentiation_plan — краткие способы поддержки и усложнения; assessment_plan — проверяемые критерии; cross_curricular_links — конкретная связь с другим предметом; health_and_safety — правила для запланированных действий. Каждый дополнительный блок — 1–2 предложения, общий объём ответа не увеличивай. Цели урока сформулируй для всех, большинства и некоторых учащихся, если пользователь не задал свои. Не выдумывай школу или организацию."
+        schema = lesson_output_schema()
         messages = [
             {"role": "system", "content": system},
             {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
         ]
-        last: Exception | None = None
-        for attempt in range(2):
+        def validate_result(result: AIResult) -> AIResult:
+            if not isinstance(result.data, dict):
+                raise AIProviderError("invalid_schema")
+            data = dict(result.data)
+            data.update({
+                "section": effective_section, "teacher_name": lesson.teacher_name,
+                "date": lesson.lesson_date, "subject": lesson.subject, "class_name": lesson.grade,
+                "present_count": lesson.present_count, "absent_count": lesson.absent_count,
+                "lesson_topic": effective_topic, "lesson_duration": lesson.lesson_duration,
+                "substitute_mode": lesson.substitute_mode, "language": lesson.language,
+            })
+            if lesson.learning_objectives:
+                data["learning_objectives"] = lesson.learning_objectives
+            if lesson.lesson_objectives:
+                data["lesson_objectives"] = lesson.lesson_objectives
+            if not lesson.homework_required:
+                data["homework"] = ""
+            if not lesson.reflection_required:
+                data["reflection"] = ""
             try:
-                result = await self.provider.generate_json(messages)
-            except AIProviderError as exc:
-                if attempt or exc.code not in {"timeout", "unavailable", "rate_limit", "provider_unavailable"}:
-                    raise
-                await asyncio.sleep(0.5 if exc.code != "rate_limit" else 1.0)
-                continue
-            try:
-                if isinstance(result.data, dict):
-                    result.data.update({
-                        "section": effective_section,
-                        "teacher_name": lesson.teacher_name,
-                        "date": lesson.lesson_date,
-                        "subject": lesson.subject,
-                        "class_name": lesson.grade,
-                        "present_count": lesson.present_count,
-                        "absent_count": lesson.absent_count,
-                        "lesson_topic": effective_topic,
-                        "lesson_duration": lesson.lesson_duration,
-                        "substitute_mode": lesson.substitute_mode,
-                        "language": lesson.language,
-                    })
-                    if lesson.learning_objectives:
-                        result.data["learning_objectives"] = lesson.learning_objectives
-                    if lesson.lesson_objectives:
-                        result.data["lesson_objectives"] = lesson.lesson_objectives
-                content = LessonContent.model_validate(result.data)
-                self.normalize_stage_times(content, lesson.lesson_duration)
-                # Programme objectives are source material and must stay verbatim.
-                result.data = content.model_dump()
-                return result
+                content = LessonContent.model_validate(data)
             except ValidationError as exc:
-                last = exc
-                if attempt:
-                    break
-                messages.extend([
-                    {"role": "assistant", "content": json.dumps(result.data, ensure_ascii=False)},
-                    {"role": "user", "content": f"Исправь JSON по схеме. Ошибки: {str(exc)[:1500]}. Верни только JSON."},
-                ])
-        raise AIProviderError("invalid_schema", str(last or "Invalid generated KSP"))
+                raise AIProviderError("invalid_schema") from exc
+            self.normalize_stage_times(content, lesson.lesson_duration)
+            result.data = content.model_dump()
+            return result
+
+        # Injected providers keep the same interface; production requests have one deadline.
+        if not isinstance(self.provider, (GoogleAIService, OpenRouterService)):
+            return validate_result(await self.provider.generate_json(messages))
+        return await generate_ai_response(
+            messages, response_schema=schema, validate=validate_result,
+            google_service=self.provider if isinstance(self.provider, GoogleAIService) else None,
+            openrouter_service=self.provider if isinstance(self.provider, OpenRouterService) else None,
+        )
 
     @staticmethod
     def standard_structure() -> dict[str, Any]:
         return {
-            "sections": ["Раздел", "ФИО педагога", "Дата", "Класс", "Количество присутствующих", "Количество отсутствующих", "Тема урока", "Цели обучения в соответствии с учебной программой", "Цели урока"],
+            "sections": ["Школа / организация", "Предмет", "Раздел", "ФИО педагога", "Дата", "Класс", "Количество присутствующих", "Количество отсутствующих", "Тема урока", "Цели обучения в соответствии с учебной программой", "Цели урока", "Языковые цели", "Дифференциация", "Оценивание", "Межпредметные связи", "Здоровье и безопасность", "Домашнее задание", "Рефлексия"],
             "tables": [{"title": "Ход урока", "columns": ["Этап урока/время", "Действия педагога", "Действия ученика", "Ресурсы", "Оценивание"]}],
         }
 

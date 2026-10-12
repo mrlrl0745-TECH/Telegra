@@ -248,7 +248,7 @@ async def test_lesson_crud_copy_and_docx_export(client, auth_headers, lesson_pay
     assert exported.status_code == 200
     assert "wordprocessingml" in exported.headers["content-type"]
     document = Document(__import__("io").BytesIO(exported.content))
-    assert len(document.tables) == 2
+    assert len(document.tables) == 3
     assert len(document.tables[1].columns) == 5
     pdf = await client.post(f"/api/lessons/{lesson['id']}/export/pdf", headers=auth_headers)
     assert pdf.status_code == 200
@@ -273,7 +273,7 @@ async def test_complete_two_user_archive_copy_edit_and_download_isolation(client
         assert package.testzip() is None
         assert "word/document.xml" in package.namelist()
     opened = Document(BytesIO(exported.content))
-    assert len(opened.tables) == 2
+    assert len(opened.tables) == 3
 
     a_archive = await client.get("/api/lessons", headers=auth_headers)
     assert [item["id"] for item in a_archive.json()] == [original_id]
@@ -337,6 +337,7 @@ async def test_substitute_teacher_can_generate_and_download_a_self_contained_les
     response = await client.post("/api/lessons/generate", headers=auth_headers, json={
         "subject": "Математика", "grade": "5А", "topic": "Доли и дроби", "learning_objectives": [],
         "lesson_objectives": [], "lesson_duration": 40, "substitute_mode": True,
+        "section": "Доли и дроби", "present_count": 25, "absent_count": 0,
     })
     assert response.status_code == 200, response.text
     lesson = response.json()

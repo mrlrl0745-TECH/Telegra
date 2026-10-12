@@ -19,7 +19,7 @@
 
 Режим учителя-замены формирует самостоятельный план с инструкциями и материалами, необходимыми для проведения урока; цели программы не выдумываются и передаются, если пользователь их указал. Архив хранит планы в аккаунте пользователя. DOCX формируется из сохранённых данных без повторного обращения к AI; несохранённые правки сохраняются перед экспортом.
 
-Тестовый режим использует локальную генерацию для проверки пользовательского сценария без AI-ключа. Для реальных запросов по умолчанию установите `AI_PROVIDER=google`, `AI_TEST_MODE=false` и задайте `GOOGLE_AI_API_KEY`; модель по умолчанию — `gemini-3.8-flash`. OpenRouter доступен как альтернативный провайдер через `AI_PROVIDER=openrouter`. Загруженная структура шаблона передаётся AI как контекст, но экспорт пока использует стандартный бланк КСП. Автоматическое OCR изображений и ручное сопоставление полей нестандартных шаблонов относятся к следующему этапу; текущий платёжный adapter намеренно не выполняет реальные списания.
+Тестовый режим использует локальную генерацию для проверки пользовательского сценария без AI-ключа. Для реальных запросов по умолчанию установите `AI_PROVIDER=google`, `AI_TEST_MODE=false` и задайте `GOOGLE_AI_API_KEY`; модель по умолчанию — `gemini-3.5-flash-lite`. OpenRouter доступен как альтернативный провайдер через `AI_PROVIDER=openrouter`. Загруженная структура шаблона передаётся AI как контекст, но экспорт пока использует стандартный бланк КСП. Автоматическое OCR изображений и ручное сопоставление полей нестандартных шаблонов относятся к следующему этапу; текущий платёжный adapter намеренно не выполняет реальные списания.
 
 ## Быстрый запуск в Docker
 
@@ -86,14 +86,48 @@ Backend проверяет HMAC Telegram initData с помощью bot token, �
 
 По умолчанию backend вызывает Google Gemini. Ключ храните только в `.env` на сервере; он передаётся Google в заголовке `x-goog-api-key` и не включается во frontend-сборку.
 
+1. Получите Gemini API key.
+2. Запишите его в `GOOGLE_AI_API_KEY`.
+3. Укажите:
+
+```env
+GOOGLE_AI_MODEL=gemini-3.5-flash-lite
+```
+
+4. Получите OpenRouter API key.
+5. Запишите:
+
+```env
+OPENROUTER_API_KEY=...
+```
+
+6. Укажите:
+
+```env
+OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
+```
+
+7. Укажите:
+
+```env
+OPENROUTER_MODEL=openrouter/free
+```
+
+Gemini — основной AI (`AI_PROVIDER=google`, `GOOGLE_AI_MODEL=gemini-3.5-flash-lite`).
+
+OpenRouter — бесплатный резервный AI-провайдер (`OPENROUTER_MODEL=openrouter/free`).
+
 ```env
 AI_PROVIDER=google
 AI_TEST_MODE=false
 GOOGLE_AI_API_KEY=...
-GOOGLE_AI_MODEL=gemini-3.8-flash
+GOOGLE_AI_MODEL=gemini-3.5-flash-lite
+OPENROUTER_API_KEY=...
+OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
+OPENROUTER_MODEL=openrouter/free
 ```
 
-Для OpenRouter задайте `AI_PROVIDER=openrouter`, `OPENROUTER_API_KEY`, `OPENROUTER_MODEL` и `OPENROUTER_BASE_URL=https://openrouter.ai/api/v1`. Запросы выполняются с backend, требуют JSON и проверяются Pydantic; при неверной структуре выполняется корректирующая попытка. Секрет не возвращается frontend и не записывается в логи.
+`generate_ai_response()` выполняет одну попытку Gemini 3.5 Flash Lite с минимальным thinking и точной JSON-схемой, затем при ошибке — одну попытку OpenRouter. Повторных циклов исправления JSON нет. Таймауты: `AI_PRIMARY_TIMEOUT=15`, `AI_FALLBACK_TIMEOUT=8`, `AI_TOTAL_TIMEOUT=24` секунд; общий wall-clock дедлайн включает ожидание обоих провайдеров. Успешный Gemini не вызывает OpenRouter. Невалидный или обрезанный ответ отвергается, ошибки не расходуют бесплатную генерацию. Время 10–15 секунд — целевой диапазон, а не гарантия скорости внешнего сервиса.
 
 ## PostgreSQL и миграции
 

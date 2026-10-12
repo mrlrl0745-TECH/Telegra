@@ -81,8 +81,8 @@ class LessonInput(BaseModel):
     subject: str = Field(min_length=2, max_length=160)
     section: str = Field(default="", max_length=300)
     grade: str = Field(min_length=1, max_length=40)
-    present_count: int = Field(default=0, ge=0, le=1000)
-    absent_count: int = Field(default=0, ge=0, le=1000)
+    present_count: int = Field(ge=0, le=1000)
+    absent_count: int = Field(ge=0, le=1000)
     topic: str = Field(default="", max_length=300)
     learning_objectives: list[str] = Field(default_factory=list, max_length=10)
     lesson_objectives: list[str] = Field(default_factory=list, max_length=10)
@@ -110,9 +110,11 @@ class LessonInput(BaseModel):
         return [value.strip()[:500] for value in values if value.strip()]
 
     @model_validator(mode="after")
-    def require_topic_or_learning_objective(self):
-        if not self.topic.strip() and not self.learning_objectives:
-            raise ValueError("Укажите тему урока или цель обучения")
+    def require_lesson_metadata(self):
+        if not self.topic.strip():
+            raise ValueError("Укажите тему урока")
+        if not self.section.strip():
+            raise ValueError("Укажите раздел программы")
         return self
 
 
@@ -123,6 +125,18 @@ class LessonStageOut(BaseModel):
     student_actions: str = Field(min_length=1, max_length=5000)
     resources: str = Field(min_length=1, max_length=2000)
     assessment: str = Field(min_length=1, max_length=3000)
+
+
+class PracticeTask(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    question: str = Field(min_length=1, max_length=2500)
+    answer: str = Field(min_length=1, max_length=2000)
+    assessment: str = Field(min_length=1, max_length=1000)
+
+
+class PracticeTasks(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    tasks: list[PracticeTask] = Field(min_length=5, max_length=5)
 
 
 class LessonContent(BaseModel):
@@ -145,6 +159,13 @@ class LessonContent(BaseModel):
     stages: list[LessonStageOut] = Field(min_length=2, max_length=14)
     homework: str = Field(default="", max_length=5000)
     reflection: str = Field(default="", max_length=5000)
+    school: str = Field(default="", max_length=300)
+    language_objectives: str = Field(default="", max_length=2000)
+    differentiation_plan: str = Field(default="", max_length=2000)
+    assessment_plan: str = Field(default="", max_length=2000)
+    cross_curricular_links: str = Field(default="", max_length=2000)
+    health_and_safety: str = Field(default="", max_length=2000)
+    practice_tasks: list[PracticeTask] = Field(default_factory=list, max_length=5)
 
     @field_validator("learning_objectives", "lesson_objectives")
     @classmethod
@@ -152,6 +173,14 @@ class LessonContent(BaseModel):
         if any(not value.strip() or len(value) > 500 for value in values):
             raise ValueError("Each objective must contain 1 to 500 characters")
         return [value.strip() for value in values]
+
+    @field_validator("section", "lesson_topic")
+    @classmethod
+    def validate_lesson_metadata(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("Раздел программы и тема урока обязательны")
+        return value
 
 
 class LessonOut(BaseModel):
@@ -211,4 +240,3 @@ class AdminBlockIn(BaseModel):
 class AdminSubscriptionIn(BaseModel):
     type: Literal["monthly", "yearly"]
     days: int | None = Field(default=None, ge=1, le=3660)
-
